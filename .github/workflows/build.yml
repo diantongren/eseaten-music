@@ -17,7 +17,7 @@ jobs:
   build:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -40,7 +40,8 @@ jobs:
       - name: Package
         run: ditto -c -k --keepParent "build/Build/Products/Release/Eseaten Music.app" EseatenMusic.zip
 
-      - uses: actions/upload-artifact@v4
+      # 已经用 ditto 打好 zip（保留 .app 的符号链接和可执行权限），直接上传，不再套一层
+      - uses: actions/upload-artifact@v7
         with:
-          name: EseatenMusic-${{ github.sha }}
           path: EseatenMusic.zip
+          archive: false
