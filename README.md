@@ -38,3 +38,7 @@ open EseatenMusic.xcodeproj
 ## 致谢
 
 感谢 [missuo/kumone](https://github.com/missuo/kumone)（LGPL-3.0）。本项目的网易云接口路径、weapi / eapi 加密方式和侧边栏结构都参考了它，代码用 Swift 6 独立重写。
+
+## 许可证
+
+[MIT](LICENSE)
