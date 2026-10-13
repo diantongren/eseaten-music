@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -28,14 +29,21 @@ jobs:
         run: xcodegen generate
 
       - name: Build
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
         run: |
           xcodebuild -version
+          # tag 构建时用 tag 作为 App 版本号（v0.2.0 → 0.2.0），否则沿用 project.yml 里的版本
+          version_args=()
+          if [ "$REF_TYPE" = tag ]; then version_args=("MARKETING_VERSION=${TAG#v}"); fi
           xcodebuild build \
             -project EseatenMusic.xcodeproj \
             -scheme EseatenMusic \
             -configuration Release \
             -destination 'generic/platform=macOS' \
-            -derivedDataPath build
+            -derivedDataPath build \
+            "${version_args[@]}"
 
       - name: Package
         run: ditto -c -k --keepParent "build/Build/Products/Release/Eseaten Music.app" EseatenMusic.zip
@@ -45,3 +53,27 @@ jobs:
         with:
           path: EseatenMusic.zip
           archive: false
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: EseatenMusic.zip
+          skip-decompress: true
+
+      # 带“-”的 tag（如 v0.2.0-beta.1）发成预发布版本
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l EseatenMusic.zip
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" EseatenMusic.zip --verify-tag --generate-notes "${prerelease[@]}"

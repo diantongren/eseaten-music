@@ -20,9 +20,19 @@
 - 歌单管理：新建、删除、加歌，收藏 / 取消收藏
 - 播放：播放条、待播清单、歌词、红心
 
+## 下载
+
+在 [Releases](https://github.com/diantongren/eseaten-music/releases/latest) 下载 `EseatenMusic.zip`，解压后把 `Eseaten Music.app` 拖进“应用程序”。需要 macOS 26，同时支持 Apple 芯片和 Intel。
+
+App 只做了 ad-hoc 签名，没有经过 Apple 公证，首次打开前需要执行：
+
+```bash
+xattr -cr "/Applications/Eseaten Music.app"
+```
+
 ## 构建
 
-每次推送到 `main` 或提交 PR 时，GitHub Actions 会自动构建，构建好的 `Eseaten Music.app` 可以在对应运行页面的 Artifacts 里下载。CI 产物只做了 ad-hoc 签名，首次打开前需要执行 `xattr -cr "/Applications/Eseaten Music.app"`。
+每次推送到 `main` 或提交 PR 时 GitHub Actions 会自动构建，产物在对应运行页面的 Artifacts 里。推送 `v*` tag（如 `v0.2.0`）会自动发布 Release，App 版本号取自 tag；带 `-` 的 tag（如 `v0.2.0-beta.1`）发成预发布版本。
 
 本地构建需要 macOS 26 和 Xcode 26。工程文件由 [XcodeGen](https://github.com/yonaskolb/XcodeGen) 根据 `project.yml` 生成，不在仓库里：
 
