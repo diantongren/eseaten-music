@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild -version
+          xcodebuild build \
+            -project EseatenMusic.xcodeproj \
+            -scheme EseatenMusic \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build
+
+      - name: Package
+        run: ditto -c -k --keepParent "build/Build/Products/Release/Eseaten Music.app" EseatenMusic.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EseatenMusic-${{ github.sha }}
+          path: EseatenMusic.zip

@@ -1,5 +1,7 @@
 # Eseaten Music
 
+[![Build](https://github.com/diantongren/eseaten-music/actions/workflows/build.yml/badge.svg)](https://github.com/diantongren/eseaten-music/actions/workflows/build.yml)
+
 用 SwiftUI 写的原生 macOS 网易云音乐客户端，直接请求网易云官方接口，不依赖第三方代理服务器。
 
 ![推荐](docs/screenshots/home.jpg)
@@ -20,7 +22,9 @@
 
 ## 构建
 
-需要 macOS 26 和 Xcode 26。工程文件由 [XcodeGen](https://github.com/yonaskolb/XcodeGen) 根据 `project.yml` 生成，不在仓库里：
+每次推送到 `main` 或提交 PR 时，GitHub Actions 会自动构建，构建好的 `Eseaten Music.app` 可以在对应运行页面的 Artifacts 里下载。CI 产物只做了 ad-hoc 签名，首次打开前需要执行 `xattr -cr "/Applications/Eseaten Music.app"`。
+
+本地构建需要 macOS 26 和 Xcode 26。工程文件由 [XcodeGen](https://github.com/yonaskolb/XcodeGen) 根据 `project.yml` 生成，不在仓库里：
 
 ```bash
 brew install xcodegen
