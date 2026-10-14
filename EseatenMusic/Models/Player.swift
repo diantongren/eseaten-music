@@ -1,5 +1,7 @@
+import AppKit
 import AVFoundation
 import Foundation
+import MediaPlayer
 import Observation
 
 /// 播放器：从网易云取播放地址，用 AVPlayer 播放
@@ -47,6 +49,9 @@ final class Player {
     @ObservationIgnored private var refill: (@MainActor () async throws -> [Song])?
     /// 打乱之前的顺序，关掉随机播放时恢复
     @ObservationIgnored private var originalQueue: [Song] = []
+    /// 给系统“正在播放”用的封面，带上歌曲 id，避免慢的请求把封面贴到下一首上
+    @ObservationIgnored private var artwork: (songID: Song.ID, value: MPMediaItemArtwork)?
+    @ObservationIgnored private var artworkTask: Task<Void, Never>?
     private static let volumeKey = "player.volume"
     private static let mutedKey = "player.muted"
 
@@ -63,6 +68,11 @@ final class Player {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.itemDidFinish() }
         })
+        // 缓冲卡住或真正开始出声时更新播放速率，系统靠它推算进度
+        observers.append(engine.observe(\.timeControlStatus) { @Sendable [weak self] _, _ in
+            Task { @MainActor in self?.updateNowPlaying() }
+        })
+        registerRemoteCommands()
     }
 
     /// 隔空播放选择器绑定到这个 AVPlayer，切换的是它的输出设备
@@ -129,6 +139,7 @@ final class Player {
             engine.play()
             isPlaying = true
         }
+        updateNowPlaying()
     }
 
     func next() { advance(by: 1) }
@@ -146,6 +157,7 @@ final class Player {
         guard current != nil else { return }
         elapsed = min(max(time, 0), duration)
         engine.seek(to: CMTime(seconds: elapsed, preferredTimescale: 600))
+        updateNowPlaying()
     }
 
     /// 播放待播清单里的某一首，不改变清单
@@ -204,6 +216,8 @@ final class Player {
         isPlaying = true
         isLoading = true
         engine.replaceCurrentItem(with: nil)
+        updateNowPlaying()
+        loadArtwork(for: song)
         loadTask?.cancel()
         loadTask = Task {
             do {
@@ -217,6 +231,7 @@ final class Player {
                 engine.replaceCurrentItem(with: AVPlayerItem(url: stream.url))
                 if isPlaying { engine.play() }
                 isLoading = false
+                updateNowPlaying()
             } catch {
                 guard !Task.isCancelled else { return }
                 isLoading = false
@@ -227,6 +242,7 @@ final class Player {
                     advance(by: 1, keepsNotice: true)
                 } else {
                     isPlaying = false
+                    updateNowPlaying()
                 }
             }
         }
@@ -266,8 +282,81 @@ final class Player {
             isPlaying = false
             engine.replaceCurrentItem(with: nil)
             elapsed = 0
+            updateNowPlaying()
         } else {
             next()
         }
+    }
+
+    // MARK: - 系统“正在播放”
+
+    /// AirPods、键盘播放键和控制中心的播放控制。macOS 只把这些按键交给注册了命令、
+    /// 并且上报了“正在播放”的 App，找不到时会去打开 Apple Music
+    private func registerRemoteCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        let commands: [(MPRemoteCommand, @MainActor @Sendable (Player) -> Void)] = [
+            (center.togglePlayPauseCommand, { $0.togglePlayPause() }),
+            (center.playCommand, { if !$0.isPlaying { $0.togglePlayPause() } }),
+            (center.pauseCommand, { if $0.isPlaying { $0.togglePlayPause() } }),
+            (center.nextTrackCommand, { $0.next() }),
+            (center.previousTrackCommand, { $0.previous() }),
+        ]
+        // 文档没说回调在哪个线程，所以闭包标成 @Sendable（不继承 MainActor），再切回主线程
+        for (command, action) in commands {
+            command.addTarget { @Sendable [weak self] _ in
+                Task { @MainActor in if let self { action(self) } }
+                return .success
+            }
+        }
+        center.changePlaybackPositionCommand.addTarget { @Sendable [weak self] event in
+            guard let time = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime else {
+                return .commandFailed
+            }
+            Task { @MainActor in self?.seek(toTime: time) }
+            return .success
+        }
+    }
+
+    /// macOS 不会根据音频输出判断谁在播放，要自己上报，`playbackState` 也得手动设置。
+    /// 系统按播放速率自己推算进度，所以只在状态变化和拖动进度时调用
+    private func updateNowPlaying() {
+        let center = MPNowPlayingInfoCenter.default()
+        guard let current else {
+            center.nowPlayingInfo = nil
+            center.playbackState = .stopped
+            return
+        }
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: current.title,
+            MPMediaItemPropertyArtist: current.artist,
+            MPMediaItemPropertyAlbumTitle: current.album,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            // 取播放地址和缓冲时 isPlaying 已经是 true，但还没出声，速率要按实际状态报
+            MPNowPlayingInfoPropertyPlaybackRate: engine.timeControlStatus == .playing ? 1.0 : 0.0,
+        ]
+        if let artwork, artwork.songID == current.id {
+            info[MPMediaItemPropertyArtwork] = artwork.value
+        }
+        center.nowPlayingInfo = info
+        center.playbackState = isPlaying ? .playing : .paused
+    }
+
+    private func loadArtwork(for song: Song) {
+        guard artwork?.songID != song.id else { return }
+        artworkTask?.cancel()
+        guard let url = song.artworkURL?.neteaseThumbnail(points: 200) else { return }
+        artworkTask = Task {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  !Task.isCancelled, let image = NSImage(data: data) else { return }
+            artwork = (song.id, Self.makeArtwork(image))
+            updateNowPlaying()
+        }
+    }
+
+    /// 系统会在后台线程取封面。闭包要是在 MainActor 方法里写，Swift 6 会给它加主线程检查，
+    /// 一被调用就崩溃，所以放在 nonisolated 的函数里创建
+    nonisolated private static func makeArtwork(_ image: NSImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 }
