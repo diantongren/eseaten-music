@@ -2,12 +2,11 @@ import SwiftUI
 
 /// 全屏的“正在播放”：左边封面、歌曲信息和播放控制，右边歌词或待播清单，
 /// 背景取封面的颜色做成缓慢流动的网格渐变。和 Apple Music 的全屏播放器一样。
+/// 由 NowPlayingPresenter 放进窗口、负责滑进滑出。
 struct NowPlayingView: View {
     let song: Song
-    let onClose: () -> Void
 
     @Environment(Player.self) private var player
-    @Environment(Account.self) private var account
     @State private var panel: SidePanel? = .lyrics
     @State private var failure: String?
 
@@ -41,18 +40,6 @@ struct NowPlayingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { ArtworkBackground(song: song, isPlaying: player.isPlaying) }
         .overlay(alignment: .bottomTrailing) { panelSwitcher.padding(16) }
-        // 关闭按钮和隔空播放、音量放进标题栏，和红绿灯同一行
-        .background {
-            TitlebarAccessories(
-                leading: closeButton,
-                trailing: OutputControls().padding(.trailing, TitlebarMetrics.edgeInset),
-                player: player, account: account
-            )
-        }
-        // Esc 关闭；标题栏里的按钮收不到窗口内容的快捷键，单独放一个
-        .background {
-            Button("关闭", action: onClose).keyboardShortcut(.cancelAction).hidden()
-        }
         // 铺满整个窗口（包括标题栏）
         .ignoresSafeArea()
         // 背景是封面的深色调，整页按深色外观显示：文字、图标都变成白色
@@ -118,20 +105,6 @@ struct NowPlayingView: View {
 
     // MARK: - 角落的按钮
 
-    private var closeButton: some View {
-        Button(action: onClose) {
-            Image(systemName: "xmark")
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 52, height: TitlebarMetrics.controlHeight)
-                .contentShape(.capsule)
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: .capsule)
-        .padding(.leading, 8)
-        .help("关闭")
-        .accessibilityLabel("关闭正在播放")
-    }
-
     /// 右下角切换歌词 / 待播清单；再点一次当前的就收起，左边内容居中
     private var panelSwitcher: some View {
         HStack(spacing: 2) {
@@ -160,6 +133,11 @@ struct NowPlayingView: View {
     }
 }
 
+extension NowPlayingView {
+    /// 全屏页滑入滑出用的弹簧
+    static let spring = Spring(duration: 0.5, bounce: 0.08)
+}
+
 private enum TitlebarMetrics {
     /// 标题栏按钮的高度，和 Apple Music 的一样
     static let controlHeight: CGFloat = 32
@@ -167,60 +145,233 @@ private enum TitlebarMetrics {
     static let edgeInset: CGFloat = (52 - controlHeight) / 2
 }
 
-/// 显示时藏起工具栏里原有的按钮（侧边栏按钮、返回按钮、搜索框等），在红绿灯同一行放上自己的按钮，关闭后恢复。
+/// 全屏“正在播放”的进出场：整页和标题栏里的按钮（左边关闭，右边隔空播放和音量）一起从底部滑上来，关闭时一起滑下去。
 ///
-/// - 标题栏区域的点击归窗口处理（拖动窗口），放在内容里的按钮点不到，所以用标题栏附件视图。
+/// - 不用 SwiftUI 的 transition：右边的歌词、待播清单是 ScrollView，在 macOS 上是 AppKit 的 NSScrollView，
+///   它不跟着 SwiftUI 的位移动画走，会直接出现在终点。所以整页放进单独的 NSHostingView，由 AppKit 移动这个视图，
+///   里面的东西一起动。
+/// - 标题栏按钮有两份，见 TitlebarChrome。
+struct NowPlayingPresenter: View {
+    let isShown: Bool
+    let onClose: () -> Void
+
+    @Environment(Player.self) private var player
+    @Environment(Account.self) private var account
+    @Environment(\.openLogin) private var openLogin
+    @Environment(\.navigate) private var navigate
+    @Environment(\.showToast) private var showToast
+    @State private var chrome = TitlebarChrome()
+
+    var body: some View {
+        let leading = hosted(closeButton)
+        let trailing = hosted(OutputControls().padding(.trailing, TitlebarMetrics.edgeInset))
+        NowPlayingHost(
+            isShown: isShown,
+            chrome: chrome,
+            page: hosted(NowPlayingPage(chrome: chrome, leading: leading, trailing: trailing)),
+            leading: leading,
+            trailing: trailing
+        )
+    }
+
+    /// 单独的 NSHostingView 拿不到这里的环境，要手动传进去
+    private func hosted(_ content: some View) -> AnyView {
+        AnyView(content
+            .environment(player)
+            .environment(account)
+            .environment(\.openLogin, openLogin)
+            .environment(\.navigate, navigate)
+            .environment(\.showToast, showToast)
+            .environment(\.colorScheme, .dark))
+    }
+
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 52, height: TitlebarMetrics.controlHeight)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .padding(.leading, 8)
+        .help("关闭")
+        .accessibilityLabel("关闭正在播放")
+    }
+}
+
+/// 标题栏按钮有两份。
+///
+/// - 标题栏区域的点击归窗口处理（拖动窗口），整页里的按钮在那里点不到，能点的一份只能放进标题栏附件视图。
+/// - 附件视图只有按钮那么大、超出的部分被裁掉，跟着整页滑的话只在最后一小段露出来。
+///
+/// 所以整页里再画一份，摆在附件的位置上：滑动时显示整页里的，停稳后换成附件里的。两份完全重合，切换时看不出来。
+@Observable
+private final class TitlebarChrome {
+    var isSliding = true
+    /// 附件在窗口里的位置（左上角为原点）
+    var leadingFrame: CGRect?
+    var trailingFrame: CGRect?
+}
+
+/// 整页的内容。滑走的途中可能已经没有当前歌曲了，这时留空
+private struct NowPlayingPage: View {
+    let chrome: TitlebarChrome
+    let leading: AnyView
+    let trailing: AnyView
+
+    @Environment(Player.self) private var player
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let song = player.current {
+                NowPlayingView(song: song)
+            }
+            if chrome.isSliding {
+                placed(leading, at: chrome.leadingFrame)
+                placed(trailing, at: chrome.trailingFrame)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private func placed(_ content: AnyView, at frame: CGRect?) -> some View {
+        if let frame {
+            content
+                .frame(width: frame.width, height: frame.height)
+                .offset(x: frame.minX, y: frame.minY)
+        }
+    }
+}
+
+/// 标题栏附件里的那份，滑动时藏起来
+private struct TitlebarAccessory: View {
+    let chrome: TitlebarChrome
+    let content: AnyView
+
+    var body: some View {
+        content.opacity(chrome.isSliding ? 0 : 1)
+    }
+}
+
+/// 打开时：放上整页（先停在窗口下面）、藏起工具栏里原有的按钮（侧边栏按钮、返回按钮、搜索框等）、
+/// 在红绿灯同一行放上自己的按钮，再滑上来。关闭时滑下去，滑完再全部拿掉、恢复工具栏按钮
+/// （提前恢复的话，它们会盖在正在滑走的整页上）。
+///
 /// - 只藏按钮、不收起工具栏：收起后标题栏只剩 28pt 高，按钮会贴着窗口顶边；
 ///   留着工具栏，附件视图的高度和工具栏一样，按钮上下有空隙，和红绿灯垂直居中。
 /// - 不用 SwiftUI 的 `.toolbar(.hidden, for: .windowToolbar)`：它会连红绿灯一起藏掉。
-private struct TitlebarAccessories<Leading: View, Trailing: View>: NSViewRepresentable {
-    let leading: Leading
-    let trailing: Trailing
-    /// 附件视图在单独的 NSHostingView 里，拿不到这里的环境，要手动传进去
-    let player: Player
-    let account: Account
+private struct NowPlayingHost: NSViewRepresentable {
+    let isShown: Bool
+    let chrome: TitlebarChrome
+    let page: AnyView
+    let leading: AnyView
+    let trailing: AnyView
+
+    /// 铺满窗口的容器。自己不接点击，没有整页时不挡住下面的页面
+    final class Container: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let view = super.hitTest(point)
+            return view === self ? nil : view
+        }
+    }
 
     final class Coordinator {
+        var isShown = false
+        var page: NSHostingView<AnyView>?
         var accessories: [NSTitlebarAccessoryViewController] = []
         /// 被藏起来的工具栏按钮，关闭时恢复
         var hiddenItems: [NSToolbarItem] = []
+        /// 每次打开 / 关闭加一；延迟执行的操作发现已经过期就放弃，快速开关时不会错乱
+        var generation = 0
+
+        func tearDown() {
+            page?.removeFromSuperview()
+            page = nil
+            accessories.forEach { $0.removeFromParent() }
+            accessories = []
+            hiddenItems.forEach { $0.isHidden = false }
+            hiddenItems = []
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> NSView { NSView() }
+    func makeNSView(context: Context) -> Container {
+        let container = Container()
+        container.wantsLayer = true
+        return container
+    }
 
-    func updateNSView(_ view: NSView, context: Context) {
+    func updateNSView(_ container: Container, context: Context) {
         let coordinator = context.coordinator
-        let views = [(AnyView(leading), NSLayoutConstraint.Attribute.leading),
-                     (AnyView(trailing), NSLayoutConstraint.Attribute.trailing)]
-        let player = player, account = account
-        // 刚创建时还没放进窗口，等下一轮
+        guard isShown != coordinator.isShown, let window = container.window else { return }
+        coordinator.isShown = isShown
+        coordinator.generation += 1
+        let generation = coordinator.generation
+        if isShown && coordinator.page == nil {
+            chrome.isSliding = true
+            install(in: container, window: window, coordinator: coordinator)
+        }
+        let chrome = chrome
+        // 下一轮再动：等标题栏把附件排好，量出位置，整页里的那份才摆得准；也不在视图更新中途改别的视图的状态
         DispatchQueue.main.async {
-            guard coordinator.accessories.isEmpty, let window = view.window else { return }
-            coordinator.hiddenItems = window.toolbar?.items.filter { !$0.isHidden } ?? []
-            coordinator.hiddenItems.forEach { $0.isHidden = true }
-            for (content, attribute) in views {
-                let hosting = NSHostingView(rootView: content
-                    .environment(player)
-                    .environment(account)
-                    .environment(\.colorScheme, .dark))
-                hosting.appearance = NSAppearance(named: .darkAqua)
-                hosting.frame.size = hosting.fittingSize
-                let accessory = NSTitlebarAccessoryViewController()
-                accessory.view = hosting
-                accessory.layoutAttribute = attribute
-                window.addTitlebarAccessoryViewController(accessory)
-                coordinator.accessories.append(accessory)
+            guard coordinator.generation == generation, let page = coordinator.page,
+                  coordinator.accessories.count == 2 else { return }
+            window.layoutIfNeeded()
+            chrome.leadingFrame = Self.frame(of: coordinator.accessories[0].view, in: container)
+            chrome.trailingFrame = Self.frame(of: coordinator.accessories[1].view, in: container)
+            chrome.isSliding = true
+            NSAnimationContext.animate(.spring(NowPlayingView.spring)) {
+                page.animator().frame.origin.y = isShown ? 0 : -container.bounds.height
+            } completion: {
+                guard coordinator.generation == generation else { return }
+                if isShown {
+                    chrome.isSliding = false
+                } else {
+                    coordinator.tearDown()
+                }
             }
         }
     }
 
-    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
-        coordinator.accessories.forEach { $0.removeFromParent() }
-        coordinator.accessories = []
-        coordinator.hiddenItems.forEach { $0.isHidden = false }
-        coordinator.hiddenItems = []
+    private func install(in container: Container, window: NSWindow, coordinator: Coordinator) {
+        // 整页：铺满容器，先放在容器下面（容器坐标原点在左下角）
+        let page = NSHostingView(rootView: self.page)
+        page.sizingOptions = []
+        page.wantsLayer = true
+        page.appearance = NSAppearance(named: .darkAqua)
+        page.frame = container.bounds.offsetBy(dx: 0, dy: -container.bounds.height)
+        page.autoresizingMask = [.width, .height]
+        container.addSubview(page)
+        page.layoutSubtreeIfNeeded()
+        coordinator.page = page
+
+        coordinator.hiddenItems = window.toolbar?.items.filter { !$0.isHidden } ?? []
+        coordinator.hiddenItems.forEach { $0.isHidden = true }
+        for (content, attribute) in [(leading, NSLayoutConstraint.Attribute.leading), (trailing, .trailing)] {
+            let hosting = NSHostingView(rootView: TitlebarAccessory(chrome: chrome, content: content))
+            hosting.appearance = NSAppearance(named: .darkAqua)
+            hosting.frame.size = hosting.fittingSize
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.view = hosting
+            accessory.layoutAttribute = attribute
+            window.addTitlebarAccessoryViewController(accessory)
+            coordinator.accessories.append(accessory)
+        }
+    }
+
+    /// 附件在容器里的位置，换成左上角为原点，和整页的 SwiftUI 坐标一致（整页停稳时和容器重合）
+    private static func frame(of view: NSView, in container: NSView) -> CGRect {
+        let rect = container.convert(view.convert(view.bounds, to: nil), from: nil)
+        return CGRect(x: rect.minX, y: container.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
+    static func dismantleNSView(_ container: Container, coordinator: Coordinator) {
+        coordinator.generation += 1
+        coordinator.tearDown()
     }
 }
 

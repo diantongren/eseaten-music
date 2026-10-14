@@ -54,11 +54,16 @@ struct ContentView: View {
                 .frame(maxHeight: .infinity, alignment: .bottom)
             }
         }
-        // 全屏“正在播放”盖住整个窗口（包括侧边栏），工具栏由它自己收起，只留红绿灯
+        // 全屏“正在播放”盖住整个窗口（包括侧边栏和标题栏），滑进滑出由它自己做
         .overlay {
-            if showsNowPlaying, let song = player.current {
-                NowPlayingView(song: song) { setNowPlaying(false) }
-                    .transition(.move(edge: .bottom))
+            NowPlayingPresenter(isShown: showsNowPlaying && player.current != nil) { setNowPlaying(false) }
+                .ignoresSafeArea()
+                .allowsHitTesting(showsNowPlaying)
+        }
+        // 全屏“正在播放”时 Esc 关闭
+        .background {
+            if showsNowPlaying {
+                Button("关闭") { setNowPlaying(false) }.keyboardShortcut(.cancelAction).hidden()
             }
         }
         // 轻提示放在最上层，全屏“正在播放”里也看得到
@@ -89,7 +94,7 @@ struct ContentView: View {
     }
 
     private func setNowPlaying(_ isShown: Bool) {
-        withAnimation(.spring(duration: 0.5, bounce: 0.08)) { showsNowPlaying = isShown }
+        withAnimation(.spring(NowPlayingView.spring)) { showsNowPlaying = isShown }
     }
 
     @ViewBuilder
